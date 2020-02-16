@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IoT-Node</title>
+    <style>
+    body {
+        background-color: white;
+        text-align: center;
+        color: grey;
+        font-family: Tahoma,Verdana,Segoe,sans-serif; 
+    }
+    </style>
+</head>
+<body>
+    <h1>environmental sensor node</h1>
+    <h2>wifi mode</h2>
+    <p>(by AL)</p>
+    <p><strong>enter new node settings</strong></p>
+    <br>
+    <form action="./config" method="post"  accept-charset="UTF-8">
+        <label>wifi name (ssid)</label>
+        <br>
+        <input type="text" name="wifi_ssid" value="myWifiName" size="30" maxlength="30">
+        <br>
+        <br>
+        <label>wifi password</label>
+        <br>
+        <input type="text" name="wifi_pw" value="myWifiPassword" size="30" maxlength="40">
+        <br>
+        <br>
+        <label>enter access-token</label>
+        <p>data will be POST to <strong>https://tb.exceeding-solutions.de/api/v1/ACCESSTOKEN/telemetry</strong></p>
+        <input type="text" name="accesstok" value="v1yzNRexYSNXScEL7Q0E" size="30" maxlength="40">
+        <br>
+        <br>
+        <label>data push interval (10..84600 s)</label>
+        <br>
+        <input type="text" name="pushintervall" value="60" size="30" maxlength="40">
+        <br>
+        <br>
+        <input type="submit" value="submit">
+    </form>
+
+</body>
+</html>
