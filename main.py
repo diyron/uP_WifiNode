@@ -1,93 +1,114 @@
 ####################################################################
 # Thingsboard Demo - wifi IoT Node
 # Use Micropython Firmware 1.12 from IDF3
+# by André Lange (2020)
 ####################################################################
 from machine import Pin, I2C
 from bme280 import *
-import usocket
-import ussl
-import ujson
 import ssd1306
 import network
-import time
+import utime
+import ujson
+import usocket
+import ussl
+from sys import print_exception
+import ntptime
 ####################################################################
-# init variables
+#board configuration
+wifi_client = network.WLAN(network.STA_IF)  # creare client interface
+wifi_ap = network.WLAN(network.AP_IF)       # create access-point interface
+i2c = I2C(scl=Pin(22), sda=Pin(21))         # general i2c object, sets pins
+oled = ssd1306.SSD1306_I2C(128, 64, i2c)    # i2c oled 128x64
+onbled = Pin(2, Pin.OUT)                    # onboard led (blue)
+#application
+bme280 = BME280(i2c=i2c)                    # i2c bme280 temp, humi, pressure
+values = bme280.values
+wifi_rst_btn = Pin(13, Pin.IN, Pin.PULL_UP) # set wifi-reset button pin, used with pull up
 nodename = "BME280_ESP_03"
-wifi_ssid = "CookieDough"
-wifi_pw = "Gaeste2049"
+wifi_ssid = None
+wifi_pw = None
 ap_name = nodename
 ap_pw = "enviam2019"
-push_intervall = 60  # Sekunden
-access_token = "v1yzNRexYSNXScEL7Q0E"  # BME280_ESP_03
-raw_url = "https://tb.exceeding-solutions.de/api/v1/"
+push_intervall = 20  # Sekunden
 i = 0
-####################################################################
-# wifi objects
-wifi_client = network.WLAN(network.STA_IF)  # creare client interface
-wifi_ap = network.WLAN(network.AP_IF)  # create access-point interface
-
-# general i2c object, sets pins
-i2c = I2C(scl=Pin(22), sda=Pin(21))
-
-# i2c oled 128x64
-oled = ssd1306.SSD1306_I2C(128, 64, i2c)
-
-# i2c bme280 temp, humi, pressure
-bme280 = BME280(i2c=i2c)
-values = bme280.values
-
-# onboard led (blue)
-onbled = Pin(2, Pin.OUT)
-
-# set wifi-reset button pin, used with pull up
-wifi_rst_btn = Pin(13, Pin.IN, Pin.PULL_UP)  # enable internal pull-up resistor
-####################################################################
+t = ""
+#HTTP API
+access_token = "TOKEN"  # device token
+raw_url = "https://[YOUR PLATFORM]"
+url_tb = raw_url + access_token + "/telemetry"
+#############################################################
 
 
-def https_post_thingsboard(url, kw_dict):
+def except_to_log(e, file=None):
+    if file is None:
+        file = "crash_logs.txt"  # default log file
+    with open(file=file, mode='w+') as f:
+        time = utime.localtime()  # 0 year, 1 month, 2 mday, 3 hour, 4 minute, 5 second, weekday, yearday
+        tstamp = str(time[0])+"-"+str(time[1])+"-"+str(time[2])+"  "+str(time[3])+":"+str(time[4])+":"+str(time[5])+"\n"
+        f.write(tstamp)
+        print_exception(e, f)
+
+
+def ntp_rtc_sync():
+    try:
+        ntptime.settime()  # sync RTC with NTP-Server
+        print('calender time (year, month, mday, hour, minute, second, weekday, yearday):', utime.localtime())
+    except Exception as e:
+        print(e)
+        except_to_log(e)
+
+
+def https_post(url, kw_dict):
     port = 443
     method = "POST"
-    proto, dummy, host, path = url.split("/", 3)
-    data = ujson.dumps(kw_dict)  # dictionary to json
+    status = 0
+    reason = "no reason"
 
-    # request
+    proto, dummy, host, path = url.split("/", 3)
+    dataj = ujson.dumps(kw_dict)  # dictionary to json
+
+    #request
     ai = usocket.getaddrinfo(host, port, 0, usocket.SOCK_STREAM)
     ai = ai[0]
 
-    s = usocket.socket(ai[0], ai[1], ai[2])
-    s.connect(ai[-1])
+    sock = usocket.socket(ai[0], ai[1], ai[2])
 
-    oled.text('wrapping SSL...', 0, 30)
-    oled.show()
+    try:
+        sock.connect(ai[-1])
+        sock = ussl.wrap_socket(sock, server_hostname=host)
+        print("WARN: server certificate could NOT be validated! (as validation is not yet implemented)")
 
-    s = ussl.wrap_socket(s, server_hostname=host)
+        sock.write(b"%s /%s HTTP/1.1\r\n" % (method, path))
+        sock.write(b"Host: %s\r\n" % host)
+        sock.write(b"Content-Type: application/json\r\n")
+        sock.write(b"Content-Length: %d\r\n" % len(dataj))
+        sock.write(b"\r\n")
+        sock.write(dataj)
 
-    s.write(b"%s /%s HTTP/1.1\r\n" % (method, path))
-    s.write(b"Host: %s\r\n" % host)
-    s.write(b"Content-Type: application/json\r\n")
-    s.write(b"Content-Length: %d\r\n" % len(data))
-    s.write(b"\r\n")
-    s.write(data)
+        #response
+        #print("socket:", sock)
+        resp = sock.readline()
+        resp = resp.split(None, 2)
+        status = int(resp[1])
+        if len(resp) > 2:
+            reason = resp[2].rstrip()
+        while True:
+            resp = sock.readline()
+            if not resp or resp == b"\r\n":
+                break
+            if resp.startswith(b"Transfer-Encoding:"):
+                if b"chunked" in resp:
+                    raise ValueError("Unsupported " + resp)
+            elif resp.startswith(b"Location:") and not 200 <= status <= 299:
+                raise NotImplementedError("Redirects not yet supported")
 
-    # response
-    # print("socket:", s)
-    resp = s.readline()
-    resp = resp.split(None, 2)
-    status = int(resp[1])
-    reason = "no reason"
-    if len(resp) > 2:
-        reason = resp[2].rstrip()
-    while True:
-        resp = s.readline()
-        if not resp or resp == b"\r\n":
-            break
-        if resp.startswith(b"Transfer-Encoding:"):
-            if b"chunked" in resp:
-                raise ValueError("Unsupported " + resp)
-        elif resp.startswith(b"Location:") and not 200 <= status <= 299:
-            raise NotImplementedError("Redirects not yet supported")
+    except Exception as e:
+        status = 0
+        print(e)
+        except_to_log(e)
 
-    s.close()
+    finally:
+        sock.close()
 
     return status, reason
 
@@ -113,30 +134,26 @@ def update_display():
 ####################################################################
 
 
-def bootpage():
-    icon = [
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 1, 1, 0, 0, 0, 1, 1, 0],
-        [1, 1, 1, 1, 0, 1, 1, 1, 1],
-        [1, 1, 1, 1, 1, 1, 1, 1, 1],
-        [1, 1, 1, 1, 1, 1, 1, 1, 1],
-        [0, 1, 1, 1, 1, 1, 1, 1, 0],
-        [0, 0, 1, 1, 1, 1, 1, 0, 0],
-        [0, 0, 0, 1, 1, 1, 0, 0, 0],
-        [0, 0, 0, 0, 1, 0, 0, 0, 0],
-    ]
+icon = [
+    [0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 1, 1, 0, 0, 0, 1, 1, 0],
+    [1, 1, 1, 1, 0, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [0, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 0, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 0, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 0, 1, 0, 0, 0, 0],
+]
 
-    oled.fill(0)  # Clear the display
-    for y, row in enumerate(icon):
-        for x, c in enumerate(row):
-            oled.pixel(x + 93, y + 23, c)
+oled.fill(0)  # Clear the display
+for y, row in enumerate(icon):
+    for x, c in enumerate(row):
+        oled.pixel(x + 93, y + 23, c)
 
-    oled.text('IoT with ', 20, 25)
-    oled.show()
-
-
-bootpage()
-time.sleep(2)  # 2 seconds
+oled.text('IoT with ', 20, 25)
+oled.show()
+utime.sleep(2)  # 2 seconds
 
 ####################################################################
 
@@ -201,7 +218,7 @@ def set_new_wifi():
 
         httpResponse.WriteResponseOk(headers=None, contentType="text/html", contentCharset="UTF-8", content=content)
 
-        time.sleep(1)
+        utime.sleep(1)
         srv.Stop()
         wifi_ap.active(False)
         import machine
@@ -226,65 +243,70 @@ try:
     wifi_ssid = wifi_ssid[:-1]
     wifi_pw = wifi_pw[:-1]
 
-    if wifi_ssid or wifi_pw or access_token or push_intervall is not None:
+except OSError:
+    pass
 
-        onbled.on()  # on
 
-        wifi_client.active(True)
-        wifi_client.config(dhcp_hostname=nodename)
-        wifi_client.connect(wifi_ssid, wifi_pw)
+if wifi_ssid or wifi_pw or access_token is not None:
 
-        oled.fill(0)
-        oled.text('Wifi connecting ...', 0, 0)
-        oled.show()
+    wifi_client.active(True)
+    wifi_client.config(dhcp_hostname=nodename)
 
-        onbled.off()  # off
+    while True:
+        if not wifi_client.isconnected():
+            onbled.on()  # on
+            oled.fill(0)
+            oled.text('Wifi connecting ...', 0, 0)
+            oled.show()
 
-        while True:
-            time.sleep(1)
-            # wifi reset
-            if not wifi_rst_btn.value():
-                print("reset button")
+            wifi_client.connect(wifi_ssid, wifi_pw)
+            while not wifi_client.isconnected():
+                pass
+            ntp_rtc_sync()
+            onbled.off()  # off
+
+        else:  # wifi connection
+            if not wifi_rst_btn.value(): # wifi reset
                 try:
                     fh = open("wifi.txt", "r")
                     fh.close()
                     import os
                     os.remove('wifi.txt')
-                except OSError:
+                except OSError:  # if file doesn't exist
                     pass
                 set_new_wifi()
                 break
 
             if i == push_intervall:
                 i = 0
-
                 onbled.on()  # on
                 val = bme280.values
-
-                # print("POST data")
                 oled.fill(0)
                 oled.text('POST...', 0, 15)
                 oled.show()
 
-                if wifi_client.isconnected():
-                    url_tb = raw_url + access_token + "/telemetry"
-                    ret = https_post_thingsboard(url=url_tb, kw_dict=val)  # 2nd Argument must be a dictionary
-                    print("response", ret)
-                    oled.text('POST done...', 0, 45)
+                url_tb = raw_url + access_token + "/telemetry"
 
+                s, r = https_post(url=url_tb, kw_dict=val)  # 2nd Argument must be a dictionary
+                # r = urequests.request(method="POST", url=url_tb, json=val)  # json = Python Dict
+                # r.close()
+                if s == 200:
+                    t = "POST done..."
                 else:
-                    print("no wifi")
-                    oled.text('no wifi', 0, 45)
+                    t = "POST err " + str(r.status_code)
 
+                oled.text(t, 0, 45)
                 oled.show()
+
                 onbled.off()  # off
             else:
                 i += 1
 
+            utime.sleep(1)
+
             update_display()
 
-    else:
-        set_new_wifi()
-
-except OSError:
+else:
     set_new_wifi()
+
+
